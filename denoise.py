@@ -39,48 +39,72 @@ from restore.utils import smoothstep
 
 from restore.model import load_trained_model
 
+from input import denoise_input
+from weighting import denoise_weight
+from restore import split_image
+from restore.utils import get_mic_relative_freqs
+import glob
+
+#------------------------------------------------------------------------------
+# Read file names in the given directory. Return the list containing all
+# MRC file names of full-sum micrographs. Shawn Zheng
+#------------------------------------------------------------------------------
+def readMicFileNames(micDir, denoiseAll):
+    aFiles = micDir
+    if aFiles[len(aFiles) - 1] == '/':
+        aFiles = aFiles + "*.mrc"
+    else:
+        aFiles = aFiles + "/*.mrc"
+    #----------------------------------
+    aFiles = glob.glob(aFiles)
+    if len(aFiles) == 0:
+        return
+    #--------------
+    aFullSumFiles = []
+    for f in aFiles:
+        if "_denoised" in f:
+            continue        
+        elif "_EVN.mrc" in f or "_ODD.mrc" in f:
+             if denoiseAll == False:                                      
+                continue
+        aFullSumFiles.append(f)
+    return aFullSumFiles
+
+
 def main(args):
     """ Main denoising CNN function """
 
     # Load STAR file and neural network
-    star_file = load_star(args.input_micrographs)
-    num_mics = len(star_file)
-    apix = star.calculate_apix(star_file)
+    aMicFiles = readMicFileNames(args.input_micrographs, args.denoiseAll)
+    num_mics = len(aMicFiles)
+    apix = 1.0
     cutoff_frequency = 1./args.max_resolution  
     nn = load_trained_model(args.model)
     suffix = args.output_suffix
-    phaseflip = args.phaseflip
-    flipback = args.flipback
     merge_noisy = args.merge_noisy
     merge_freq1 = 1./(args.merge_resolution+args.merge_width)
     merge_freq2 = 1./args.merge_resolution
 
 
     # Main denoising loop
-    for i, metadata in tqdm(star_file.iterrows(),
-                            desc="Denoising", total=num_mics):
-
-        mic_file = metadata[star.Relion.MICROGRAPH_NAME]
+    for i in range(num_mics):
+        print("Denoise micrograph: " + str(i))
+        mic_file = aMicFiles[i]
 
         # Pre-calculate frequencies, angles, and soft mask
         if not i:
             first_mic = load_mic(mic_file)
             freqs, angles = get_mic_freqs(first_mic, apix, angles=True)    
-            softmask = 1.- smoothstep(merge_freq1, merge_freq2, freqs)
-            merge_band = (softmask<1) * (softmask>0)
+            denoise_weight.calcWeight(first_mic, args.merge_resolution, \
+                args.merge_width)
 
-        new_mic = process(nn, mic_file, metadata, freqs, angles, apix, 
-                          cutoff_frequency, softmask, merge_band, 
-                          phaseflip=phaseflip, flipback=flipback, 
-                          merge_noisy=merge_noisy)
-
+        new_mic = process(nn, mic_file, freqs, angles, apix, cutoff_frequency) 
         new_mic_file = mic_file.replace(".mrc", "{0}.mrc".format(suffix))
         save_mic(new_mic, new_mic_file)
 
     return
 
-def process(nn, mic_file, metadata, freqs, angles, apix, cutoff, softmask,
-            merge_band, hp=.005, phaseflip=True, flipback=False, merge_noisy=False):
+def process(nn, mic_file, freqs, angles, apix, cutoff):
     """ Denoise a cryoEM image 
  
     The following steps are performed:
@@ -102,79 +126,36 @@ def process(nn, mic_file, metadata, freqs, angles, apix, cutoff, softmask,
     mic = normalize(load_mic(mic_file))
     mic_ft = rfft2(mic) 
 
-    if phaseflip:
-        m = metadata
-        try:
-            phase_shift = m[star.relion.PHASESHIFT]
-        except:
-            phase_shift = 0.
-
-        ctf_img = ctf.eval_ctf(freqs, angles,
-                               m[star.Relion.DEFOCUSU],
-                               m[star.Relion.DEFOCUSV],
-                               m[star.Relion.DEFOCUSANGLE],
-                               phase_shift,
-                               m[star.Relion.VOLTAGE],
-                               m[star.Relion.AC],
-                               m[star.Relion.CS],
-                               lp=2*apix)
-
-        mic_ft *= np.sign(ctf_img)
-        
-
     # Fourier crop the micrograph and bandpass filter
     mic_ft_bin = fourier_crop(mic_ft, freqs, cutoff)
-    freqs_bin = fourier_crop(freqs, freqs, cutoff) 
-
-    bp_filter = ((1. - 1./(1.+ (freqs_bin/ hp)**(10))) 
-                     + 1./(1.+ (freqs_bin/ cutoff )**(10)))/2.
-
-    mic_ft_bin *= bp_filter
+    freqs_bin = fourier_crop(freqs, freqs, cutoff)
+    #---------------------------------------------
     mic_bin = normalize(irfft2(mic_ft_bin).real)
+    #-------------------------------------------
+    
+    split = split_image.Split()
+    patches, split_info = split.doIt(mic_bin)
+    
+    for i in range(patches.shape[0]):
+        p_x = patches[i].shape[0]
+        p_y = patches[i].shape[1]
+        denoised = nn.predict(patches[i].reshape((1, p_x, p_y, 1)))
+        patches[i] = denoised.reshape(p_x, p_y)
 
-    # Pad the image so the dimension is divisible by 32 (2**5)
-    n_x, n_y = mic_bin.shape
-    x_p, y_p = (next32(n_x) - n_x)//2, (next32(n_y) - n_y)//2
-    mic_bin = np.pad(mic_bin, ((x_p, x_p), (y_p,y_p)), mode='mean')
-    n_x2, n_y2 = mic_bin.shape
-
-    # Denoise and unpad the image
-    denoised = nn.predict(mic_bin.reshape((1,n_x2,n_y2,1)))
-    denoised = denoised.reshape((n_x2,n_y2))
-    denoised = denoised[x_p : n_x+x_p, y_p:n_y+y_p] 
-
+    assemble = split_image.Assemble()
+    denoised = assemble.doIt(patches, split_info, mic_bin)
+    
+    #-----------------------------------------------------
     # Upsample by Fourier padding
     denoised_ft = rfft2(normalize(denoised))
     denoised_ft_full = fourier_pad_to_shape(denoised_ft, mic_ft.shape)
-
-    # Merge images or apply final low-pass filter
-    if merge_noisy:
-        # Sample every nth Fourier amplitude for normalization
-        n = 50
-        denoised_amp_band = np.abs(denoised_ft_full[merge_band][::n]).ravel()
-        noisy_amp_band = np.abs(mic_ft[merge_band][::n]).ravel()
-        merge_factor = (np.std(denoised_amp_band) / np.std(noisy_amp_band))
-
-        # Separate images into amplitude and phase
-        denoised_amp = np.abs(denoised_ft_full)
-        denoised_phase = np.angle(denoised_ft_full)
-
-        noisy_amp = np.abs(mic_ft)
-        noisy_phase = np.angle(mic_ft)
-
-        # Weighted amplitude average, unweighted phase average, reconstruct FT
-        merge_amp = (denoised_amp*softmask) + merge_factor*noisy_amp*(1.-softmask) 
-        merge_phase = (denoised_phase * softmask) + noisy_phase*(1.-softmask)
-        merge_ft = merge_amp*(np.cos(merge_phase) + 1j*np.sin(merge_phase))
-        
-        denoised_ft_full = merge_ft
-
-    else:
-        denoised_ft_full = denoised_ft_full*softmask
-
-    # Flip phases back (multiply FT again by sign of the CTF) if requested
-    if phaseflip and flipback:
-        denoised_ft_full *= np.sign(ctf_img)
+    #-----------------------------------------------------------------
+    weight = denoise_weight.getWeight() * 0.25
+    denoised_ft_full = denoised_ft_full * weight  + mic_ft * (1 - weight)
+    #--------------------------------------------------------------------
+    highPass = denoise_weight.getHighPass()
+    #print(highPass)
+    #denoised_ft_full = denoised_ft_full * highPass
 
     denoised_full = irfft2(denoised_ft_full).real.astype(np.float32)
     new_mic = denoised_full
@@ -182,59 +163,5 @@ def process(nn, mic_file, metadata, freqs, angles, apix, cutoff, softmask,
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--input_micrographs", "-m", type=str, default=None,
-                        help="STAR file with micrographs to restore")
-
-    parser.add_argument("--model", "-p", type=str, default=None, 
-                        help="Neural network model with trained parameters")
-
-    parser.add_argument("--output_suffix", "-s", type=str, default="_denoised",
-                        help="Suffix added to denoised image output")
-
-    parser.add_argument("--max_resolution", "-r", type=float, default=4.5,
-                        help="Highest spatial frequencies to consider when denoising (angstroms). \
-                              Determines the extent of Fourier binning. Should be \
-                              consistent with the resolution of the training data.")
-
-    parser.add_argument("--merge_resolution", "-x", type=float, default=3.,
-                        help="Fourier components lower than this are included in the final denoised image")
-
-    parser.add_argument("--merge_width", "-w", type=float, default=2.,
-                        help="Sets the width of the smooth amplitude decay. \
-                              Ex. if merge_resolution=14 and merge_width=2, \
-                              then the denoised image is Fourier filtered with \
-                              a lowpass amplitude filter that smoothly decays \
-                              from 1 to 0 over the 1/16A to 1/14A frequency band." )                              
-
-    parser.add_argument("--merge_noisy", dest="merge_noisy", action="store_true",
-                        help="Merge the low-resolution denoised image with the \
-                              high-resolution components of the raw image. If false,\
-                              Otherwise, the merge filter is used as a lowpass filter.")
-
-    parser.add_argument("--dont_merge_noisy", dest="merge_noisy", action="store_false",
-                        help="Don't merge the low-resolution denoised image with the \
-                              high-resolution noisy image")
-
-    parser.set_defaults(merge_noisy=False)
-
-    parser.add_argument("--phaseflip", dest="phaseflip", action="store_true",
-                        help="Correct the CTF by phase-flipping. Should be consistent \
-                              with the training data.")
-    parser.add_argument("--dont_phaseflip", dest="phaseflip", action="store_false",
-                        help="Don't phase-flip.")
-
-    parser.set_defaults(phaseflip=True)
-
-    parser.add_argument("--flip_phases_back", dest="flipback", action="store_true",
-                        help="Reverse the phase-flip operation after denoising. This \
-                              can be useful for processing denoised images in 3D \
-                              reconstruction softwares that do not support phase-\
-                              flipped images (i.e. cryoSPARC and cisTEM)")
-
-    parser.add_argument("--dont_flip_phases_back", dest="flipback", action="store_false",
-                        help="Don't reverse the phase-flip operation after denoising.")
-    parser.set_defaults(flipback=False)
-   
-    sys.exit(main(parser.parse_args()))
+    args = denoise_input.getArgs() 
+    sys.exit(main(args))
