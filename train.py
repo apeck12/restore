@@ -48,6 +48,9 @@ from restore.model import get_callbacks
 from external.memory_saving_gradients import gradients_memory
 from keras import backend as K
 
+from input import train_input
+import glob
+
 def main(args):
     """Main function for training a denoising CNN"""
 
@@ -106,9 +109,46 @@ def main(args):
 
     return 
 
+#------------------------------------------------------------------------------
+# Read file names in the given directory. Return the list containing all
+# MRC file names of full-sum micrographs. Shawn Zheng
+#------------------------------------------------------------------------------
+def readMicFileNames(micDir):
+        aFiles = micDir;
+        if aFiles[len(aFiles) - 1] == '/':
+                aFiles = aFiles + "*.mrc"
+        else:
+                aFiles = aFiles + "/*.mrc"
+        #----------------------------------
+        aFiles = glob.glob(aFiles)
+        if len(aFiles) == 0:
+                return
+        #--------------
+        aFullSumFiles = []
+        for f in aFiles:
+                if "_EVN.mrc" in f or "_ODD.mrc" in f:
+                        continue
+                elif "_DW.mrc" in f:
+                        aFullSumFiles.append(f)
+        if len(aFullSumFiles) > 0 :
+                return aFullSumFiles
+        #---------------------------
+        for f in aFiles:
+                if "_EVN.mrc" in f or "_ODD.mrc" in f:
+                        continue
+                else:
+                        aFullSumFiles.append(f)
+        return aFullSumFiles
+
+def changeSuffix(micFileName, newSuffix):
+        if "_DW.mrc" in micFileName:
+                return micFileName.replace("_DW.mrc", newSuffix)
+        else:
+                return micFileName.replace(".mrc", newSuffix)
+
 
 def generate_training_data(training_mics, cutoff, training_data, suffixes,
-                           window=192, phaseflip=True):
+                           window=192, phaseflip=False):
     """ Generate the training data given micrographs and their CTF information
 
     Keyword arguments:
@@ -120,13 +160,16 @@ def generate_training_data(training_mics, cutoff, training_data, suffixes,
     By default, phase-flipping is performed to correct for the CTF.
     """
 
-    star_file = load_star(training_mics)
-    apix = star.calculate_apix(star_file)
-    n_mics = len(star_file)
-
+    aFullSumFiles = readMicFileNames(training_mics)
+    n_mics = len(aFullSumFiles)
+    #--------------------------
+    # cutoff is relative frequence
+    #-----------------------------
+    apix = 1.0
+    #---------
     dset_file = File(training_data, "w")
     dset_shape, n_patches, mic_freqs, mic_angles = get_dset_shape(
-                                                       star_file, window, 
+                                                       aFullSumFiles, window, 
                                                        apix, cutoff)
 
     even_dset = dset_file.create_dataset("even", dset_shape, dtype="float32")
@@ -136,20 +179,20 @@ def generate_training_data(training_mics, cutoff, training_data, suffixes,
     if len(suffixes.split(",")) != 3:
         raise Exception("Improperly formatted suffixes for even/odd mics!")
 
-    for i, metadata in tqdm(star_file.iterrows(), 
-                            desc="Pre-processing", total=n_mics):
-        
-        mic_file = metadata[star.Relion.MICROGRAPH_NAME]
-        even_file = mic_file.replace(orig, even)
-        odd_file = mic_file.replace(orig, odd)
-
-        mic_even_patches, apix_bin = process(metadata, cutoff, window, 
+    print("Pre-processing " + str(n_mics) + " micrographs")
+    for i in range(n_mics):
+        print("Preprocessing micrograph: " + str(i))
+        mic_file = aFullSumFiles[i]
+        even_file = changeSuffix(mic_file, "_EVN.mrc")
+        odd_file = changeSuffix(mic_file, "_ODD.mrc")
+        #--------------------------------------------
+        mic_even_patches, apix_bin = process(cutoff, window, 
                                              even_file, mic_freqs, mic_angles,
-                                             phaseflip=phaseflip)
+                                             )
 
-        mic_odd_patches, apix_bin = process(metadata, cutoff, window, 
-                                            odd_file, mic_freqs, mic_angles,
-                                            phaseflip=phaseflip)
+        mic_odd_patches, apix_bin = process(cutoff, window, 
+                                            odd_file, mic_freqs, mic_angles
+                                            )
 
         even_dset[i*n_patches: (i+1)*n_patches] = mic_even_patches
         odd_dset[i*n_patches: (i+1)*n_patches] = mic_odd_patches
@@ -165,24 +208,25 @@ def generate_training_data(training_mics, cutoff, training_data, suffixes,
     return 
 
 
-def get_dset_shape(star_file, window, apix, cutoff_frequency):
+def get_dset_shape(micFileNames, window, apix, cutoff_frequency):
     """Calculate the expected shape of the training dataset.
     Returns the shape of the dataset, the number of patches per micrograph,
     and the unbinned spatial frequency and angle arrays so they don't need 
     to be recalculated in later steps"""
 
-    first_mic = load_mic(star_file[star.Relion.MICROGRAPH_NAME][0])
+    print("*****: " + micFileNames[0])
+    first_mic = load_mic(micFileNames[0])
     mic_bin = bin_mic(first_mic, apix, cutoff_frequency)
 
     s,a = get_mic_freqs(first_mic, apix, angles=True)
     n_patches = len(get_patches(mic_bin, window))
-    n_mics = len(star_file)
+    n_mics = len(micFileNames)
 
     return (n_patches*n_mics, window, window, 1), n_patches, s, a
 
 
-def process(metadata, cutoff, window, mic_file, freqs, angles, 
-            bandpass=True, hp=.005, phaseflip=True):
+def process(cutoff, window, mic_file, freqs, angles, 
+            bandpass=True, hp=.005):
     """ Process a training micrograph.
 
     The following steps are performed:
@@ -209,25 +253,6 @@ def process(metadata, cutoff, window, mic_file, freqs, angles,
                    + 1./(1.+(freqs_bin/cutoff)**10)/2.)
         mic_ft_bin *= bp_filt
 
-    if phaseflip:
-        m = metadata
-        try:
-            phase_shift = m[star.relion.PHASESHIFT]
-        except:
-            phase_shift = 0.
- 
-        ctf_img = ctf.eval_ctf(freqs_bin, angs_bin,
-                               m[star.Relion.DEFOCUSU],
-                               m[star.Relion.DEFOCUSV],
-                               m[star.Relion.DEFOCUSANGLE],
-                               phase_shift,
-                               m[star.Relion.VOLTAGE],
-                               m[star.Relion.AC],
-                               m[star.Relion.CS], 
-                               bf = 0, lp=2*apix_bin)
-
-        mic_ft_bin *= np.sign(ctf_img)
-    
     mic = irfft2(mic_ft_bin).real.astype('float32')
     patches = [normalize(p) for p in get_patches(mic, window)]
     n_patches = len(patches)
@@ -236,65 +261,6 @@ def process(metadata, cutoff, window, mic_file, freqs, angles,
  
 
 if __name__=="__main__":
-    parser = argparse.ArgumentParser(
-                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    # Required arguments: 
-    # User must provide STAR file of training mics (--training_mics, -m)
-    # OR training data HDF file (--trainind_data, -t)
-    parser.add_argument("--training_mics", "-m", type=str, default=None,
-                        help="STAR file with micrographs and CTF information")
-
-    parser.add_argument("--training_data", "-t", type=str, default=None,
-                        help="HDF file containing processed training data")
-
-    # Optional arguments
-    parser.add_argument("--even_odd_suffix", "-s", type=str, 
-                        default="DW,EVN,ODD",
-                        help="A comma-separated series of three suffixes.  \
-                              The first is a suffix in the training micrographs name. \
-                              The second is the suffix of the 'even' sums. \
-                              The third is the suffix of the 'odd' sums. \
-                                                                             \
-                              If MotionCor2 is used to generate even/odd sums,\
-                              the default should be sufficient.")
-
-    parser.add_argument("--max_resolution", "-r", type=float, default=4.5, 
-                        help="Max resolution to consider in training (angstroms). \
-                              Determines the extent of Fourier binning.")
-
-    parser.add_argument("--training_filename", "-f", type=str, default="training_data.hdf",
-                        help="Name for the newly generated training data file.")
-
-    parser.add_argument("--initial_model", "-i", type=str, default=None,
-                        help="Initialize training with this pre-trained model")
-
-    parser.add_argument("--batch_size", "-b", type=float, default=10,
-                        help="Number of training examples used per training batch.")
-
-    parser.add_argument("--learning_rate", "-lr", type=float, default=1e-4,
-                        help="Initial learning rate for training the neural network")
-
-    parser.add_argument("--number_of_epochs", type=int, default=100,
-                        help="Number of training epochs to perform. \
-                              Model checkpoints are produced after every epoch.")
-
-    parser.add_argument("--batches_per_epoch", type=int, default=500,
-                        help="Number of training batches per epoch")
-
-    parser.add_argument("--model_prefix", "-x", type=str, default="model", 
-                        help="Prefix for model files containing the structure and \
-                              weights of the neural network.")
-
-    parser.add_argument("--model_directory", "-d", type=str, default="Models",
-                        help="Directory where trained model files are saved")
-    
-    parser.add_argument("--phaseflip", dest="phaseflip", action="store_true",
-                        help="Correct the CTF of the training images by phase-flipping")
-
-    parser.add_argument("--dont_phaseflip", dest="phaseflip", action="store_false",
-                        help="Don't phase-flip the training images.") 
-
-    parser.set_defaults(phaseflip=True) 
-
-    sys.exit(main(parser.parse_args()))
+    args = train_input.getArgs()
+    sys.exit(main(args))
