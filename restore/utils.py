@@ -113,14 +113,14 @@ def get_mic_freqs(mic, apix, angles=False):
     else:
         return s
 
-def get_mic_relative_freqs(mic, angles=False):
+def get_mic_relative_freqs(mic):
     '''Written by Shawn Zheng
        Use to design filter
     '''
     n_x, n_y = mic.shape
     x, y = np.meshgrid(rfftfreq(n_y), fftfreq(n_x))
     s = np.sqrt(x**2 + y**2)
-    s = np.where(s > 0.5, 0.5, s) # cap at o.5
+    s = np.where(s > 0.5, 0.5, s) # cap at 0.5
     return s
 
 def fourier_crop(mic_ft, mic_freqs, cutoff):
