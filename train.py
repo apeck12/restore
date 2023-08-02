@@ -157,7 +157,7 @@ def generate_training_data(training_mics, cutoff, training_data, suffixes,
     training_data -- Filename for the HDF file that is created 
 
     It is presumed that all images have the same shape and pixel size. 
-    By default, phase-flipping is performed to correct for the CTF.
+    Phase-flipping is currently not performed to correct for the CTF.
     """
 
     aFullSumFiles = readMicFileNames(training_mics)
@@ -232,10 +232,8 @@ def process(cutoff, window, mic_file, freqs, angles,
     The following steps are performed:
     (1) The micrograph is loaded, Fourier transformed and Fourier cropped
     (2) A bandpass filter is applied with pass-band from cutoff to 1/200A
-    (3) The FT is multiplied by the sign of the CTF (phase-flipping)
-        This is a crude form of CTF correction. 
-    (4) The inverse FT is calculated to return to real-space
-    (5) The binned, filtered image is divided into patches, which are
+    (3) The inverse FT is calculated to return to real-space
+    (4) The binned, filtered image is divided into patches, which are
         normalized (Z-score normalization) and returned
     """
 

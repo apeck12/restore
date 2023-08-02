@@ -1,17 +1,7 @@
 
 import numpy as np
 from numpy.fft import rfftfreq, fftfreq
-
-
-def get_mic_relative_freqs(mic, angles=False):
-    '''Written by Shawn Zheng
-       Use to design filter
-    '''
-    n_x, n_y = mic.shape
-    x, y = np.meshgrid(rfftfreq(n_y), fftfreq(n_x))
-    s = np.sqrt(x**2 + y**2)
-    s = np.where(s > 0.5, 0.5, s) # cap at 0.5
-    return s
+from restore.utils import get_mic_relative_freqs
 
 class denoise_weight:
 
