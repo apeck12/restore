@@ -150,21 +150,20 @@ class denoise_input:
                   of its original value. The cutoff frequencies are at \
                   central frequence +/- half of the width." )
 
-        parser.add_argument("--merge_noisy", dest="merge_noisy", 
+        parser.add_argument("--dont_merge_noisy", dest="dont_merge_noisy", 
             action="store_true",
-            help="Merge the low-resolution denoised image with the \
+            help="Do not merge the low-resolution denoised image with the \
             high-resolution components of the raw image. If false,\
                 Otherwise, the merge filter is used as a lowpass filter.")
-
-        parser.add_argument("--dont_merge_noisy", 
-            dest="merge_noisy", action="store_false",
-            help="Don't merge the low-resolution denoised image with the \
-                  high-resolution noisy image")
 
         parser.add_argument("--denoise_all", dest="denoiseAll",
             action="store_true",
             help="Denoise all MRC files in the input directory.")
 
+        parser.add_argument("--outdir", "-o", dest="outdir",
+            type=str, required=False,
+            help="Save files to specified output directory instead of input_micrographs dir")
+        
         cls._args = parser.parse_args()
         return cls._args
 

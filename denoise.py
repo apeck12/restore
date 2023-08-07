@@ -18,6 +18,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import sys
+import os
 import argparse
 from tqdm import tqdm
 
@@ -81,7 +82,7 @@ def main(args):
     cutoff_frequency = 1./args.max_resolution  
     nn = load_trained_model(args.model)
     suffix = args.output_suffix
-    merge_noisy = args.merge_noisy
+    merge_noisy = not args.dont_merge_noisy
     merge_freq1 = 1./(args.merge_resolution+args.merge_width)
     merge_freq2 = 1./args.merge_resolution
 
@@ -98,13 +99,13 @@ def main(args):
             denoise_weight.calcWeight(first_mic, args.merge_resolution, \
                 args.merge_width)
 
-        new_mic = process(nn, mic_file, freqs, angles, apix, cutoff_frequency) 
+        new_mic = process(nn, mic_file, freqs, angles, apix, cutoff_frequency, merge_noisy, outdir=args.outdir) 
         new_mic_file = mic_file.replace(".mrc", "{0}.mrc".format(suffix))
         save_mic(new_mic, new_mic_file)
 
     return
 
-def process(nn, mic_file, freqs, angles, apix, cutoff):
+def process(nn, mic_file, freqs, angles, apix, cutoff, merge_noisy=True, outdir=None):
     """ Denoise a cryoEM image 
  
     The following steps are performed:
@@ -149,13 +150,23 @@ def process(nn, mic_file, freqs, angles, apix, cutoff):
     # Upsample by Fourier padding
     denoised_ft = rfft2(normalize(denoised))
     denoised_ft_full = fourier_pad_to_shape(denoised_ft, mic_ft.shape)
+
+    if outdir is not None:
+        savename = os.path.join(outdir, mic_file.split("/")[-1])
+        savename = savename.replace(".mrc", "{0}.npy".format("_denoised_ft"))
+        np.save(savename, denoised_ft_full)
+        savename = os.path.join(outdir, mic_file.split("/")[-1])
+        savename = savename.replace(".mrc", "{0}.npy".format("_original_ft"))
+        np.save(savename, mic_ft)
+
     #-----------------------------------------------------------------
-    weight = denoise_weight.getWeight() * 0.25
-    denoised_ft_full = denoised_ft_full * weight  + mic_ft * (1 - weight)
-    #--------------------------------------------------------------------
-    highPass = denoise_weight.getHighPass()
-    #print(highPass)
-    #denoised_ft_full = denoised_ft_full * highPass
+    if merge_noisy:
+        weight = denoise_weight.getWeight() * 0.25
+        denoised_ft_full = denoised_ft_full * weight  + mic_ft * (1 - weight)
+        #--------------------------------------------------------------------
+        highPass = denoise_weight.getHighPass()
+        #print(highPass)
+        #denoised_ft_full = denoised_ft_full * highPass
 
     denoised_full = irfft2(denoised_ft_full).real.astype(np.float32)
     new_mic = denoised_full
