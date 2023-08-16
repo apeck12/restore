@@ -81,7 +81,8 @@ def main(args):
     if args.initial_model:
         nn = load_trained_model(args.initial_model)
     else:
-        nn = get_model(learning_rate)
+        nn = get_model(learning_rate, layers=args.layers,
+                       blocks_per_layer=args.blocks_per_layer)
 
     # Create the model directory
     model_directory = args.model_directory

@@ -102,6 +102,14 @@ class train_input:
             action="store_false",
             help="Don't phase-flip the training images.") 
 
+        parser.add_argument("--layers", dest="layers",
+            type=int, default=3,
+            help="Number of layers for wide activation U-Net")
+
+        parser.add_argument("--blocks_per_layer", dest="blocks_per_layer",
+            type=int, default=4,
+            help="Number of blocks per layer for wide activation U-Net")
+        
         parser.set_defaults(phaseflip=True) 
 
         cls._args = parser.parse_args()

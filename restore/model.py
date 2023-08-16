@@ -166,6 +166,7 @@ def waunet(layers=3, blocks_per_layer=4, expansion=4):
     kernel_size = k = 3
     num_filters = f = 32
     e = expansion
+    print(f"{layers} layers with {blocks_per_layer} blocks per layer")
     
     def wa_block(n, f, e, k, strides=None):
         """ Wide-activation convolutional block """
@@ -233,14 +234,14 @@ def waunet(layers=3, blocks_per_layer=4, expansion=4):
     output_layer = n
     return Model(input_layer, output_layer)
 
-def get_model(learning_rate, model='waunet'):
+def get_model(learning_rate, model='waunet', layers=3, blocks_per_layer=4):
     """ Initialize a new neural network model 
     Uses the Adam optimizer with weight normalization. """
     opt = AdamWithWeightnorm(lr = learning_rate, 
               beta_1=0.9, beta_2=0.99, epsilon=1e-8)
 
     if model=='waunet':
-         nn = waunet()
+         nn = waunet(layers=layers, blocks_per_layer=blocks_per_layer)
     elif model=='unet':
          nn = unet()
     else:
